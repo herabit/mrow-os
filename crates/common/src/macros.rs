@@ -50,9 +50,11 @@ macro_rules! var {
 }
 
 /// Parses a compile time environment variable if it exists.
+///
+/// Optionally provide a default value for if it does not exist.
 #[macro_export]
 macro_rules! option_var {
-    ($name:expr, $ty:ident $(,)?) => {{
+    ($name:expr, $ty:ident  $(,)?) => {{
         match ::core::option_env!($name) {
             ::core::option::Option::Some(digits) => {
                 let digits = ::core::primitive::str::as_bytes(digits);
@@ -61,6 +63,13 @@ macro_rules! option_var {
                 ::core::option::Option::Some(value)
             }
             ::core::option::Option::None => ::core::option::Option::None,
+        }
+    }};
+
+    ($name:expr, $ty:ident, $default:expr $(,)?) => {{
+        match $crate::option_var!($name, $ty) {
+            ::core::option::Option::Some(value) => value,
+            ::core::option::Option::None => $default,
         }
     }};
 }

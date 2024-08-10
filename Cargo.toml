@@ -20,6 +20,7 @@ workspace = true
 [workspace]
 members = [
     "crates/common",
+    "crates/bios-stage-1",
 ]
 resolver = "2"
 

@@ -169,6 +169,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "mrow-bios-stage-1"
+version = "0.1.0"
+
+[[package]]
 name = "mrow-common"
 version = "0.1.0"
 
