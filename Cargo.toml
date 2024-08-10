@@ -1,0 +1,45 @@
+[package]
+name = "mrow"
+description = "A small, experimental x86 operating system."
+
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+edition.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = "1.0.86"
+cargo_metadata = "0.18.1"
+clap = { version = "4.5.15", features = ["derive"] }
+
+[lints]
+workspace = true
+
+[workspace]
+members = [
+    "crates/common",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+authors = ["Hera Chamorro <hera@hera.wtf>"]
+license = "MIT or Apache-2.0"
+edition = "2021"
+publish = false
+repository = "https://github.com/herabit/mrow-os"
+
+[workspace.dependencies]
+sptr = "0.3.2"
+bytemuck = { version = "1.16.3", features = ["derive", "min_const_generics"] }
+common = { path = "crates/common" }
+
+[workspace.lints.rust]
+missing_unsafe_on_extern = "forbid"
+unsafe_op_in_unsafe_fn = "warn"
+unused_unsafe = "allow"
+
+[workspace.lints.clippy]
+borrow_as_ptr = "warn"

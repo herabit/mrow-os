@@ -1,0 +1,17 @@
+[package]
+name = "mrow-common"
+edition = "2021"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+# alloc = []
+
+[dependencies]
+
+[lints]
+workspace = true
