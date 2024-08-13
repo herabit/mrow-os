@@ -76,9 +76,9 @@ fn build_bios(build_dir: &Utf8Path, metadata: &Metadata, profile: &str) -> anyho
     let bytes = util::objcopy_binary(
         &elf,
         &mut Vec::new(),
-        &mut Vec::new(),
-        0,
         &mut output,
+        &mut None,
+        0,
         |section| !will_strip(section, true),
     )
     .with_context(|| format!("copying {path:?}"))?;
