@@ -8,6 +8,7 @@ publish.workspace = true
 repository.workspace = true
 
 [dependencies]
+mrow-common = { workspace = true, default-features = false }
 
 [lints]
 workspace = true

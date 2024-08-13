@@ -1,0 +1,8 @@
+[language-server.rust-analyzer.config]
+# cargo.target = "x86_64-unknown-none"
+# cargo.allTargets = false
+# checkOnSave.allTargets = false
+# checkOnSave.extraArgs = [
+#   "--target",
+#   "x86_64-unknown-none"
+# ]

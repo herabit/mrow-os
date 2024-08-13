@@ -13,6 +13,7 @@ repository.workspace = true
 anyhow = "1.0.86"
 cargo_metadata = "0.18.1"
 clap = { version = "4.5.15", features = ["derive"] }
+object = { version = "0.36.3", default-features = false, features = ["read_core", "elf", "compression", "unaligned", "std"] }
 
 [lints]
 workspace = true
@@ -33,9 +34,7 @@ publish = false
 repository = "https://github.com/herabit/mrow-os"
 
 [workspace.dependencies]
-sptr = "0.3.2"
-bytemuck = { version = "1.16.3", features = ["derive", "min_const_generics"] }
-common = { path = "crates/common" }
+mrow-common = { path = "crates/common" }
 
 [workspace.lints.rust]
 missing_unsafe_on_extern = "forbid"
@@ -44,3 +43,22 @@ unused_unsafe = "allow"
 
 [workspace.lints.clippy]
 borrow_as_ptr = "warn"
+
+[profile.release]
+panic = "abort"
+
+[profile.dev]
+panic = "abort"
+
+
+[profile.release.package.mrow-bios-stage-1]
+opt-level = "s"
+codegen-units = 1
+debug = false
+overflow-checks = false
+
+[profile.dev.package.mrow-bios-stage-1]
+opt-level = "s"
+codegen-units = 1
+debug = false
+overflow-checks = false
