@@ -23,7 +23,6 @@ where
 }
 
 /// Returns how many bytes were written.
-#[inline]
 pub fn objcopy_binary<'data, 'file, Elf, R, W, P>(
     elf: &'file ElfFile<'data, Elf, R>,
     scratch_buffer: &mut Vec<u8>,
