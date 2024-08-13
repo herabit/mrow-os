@@ -13,7 +13,9 @@ repository.workspace = true
 anyhow = "1.0.86"
 cargo_metadata = "0.18.1"
 clap = { version = "4.5.15", features = ["derive"] }
+flate2 = "1.0.31"
 object = { version = "0.36.3", default-features = false, features = ["read_core", "elf", "compression", "unaligned", "std"] }
+ruzstd = "0.7.0"
 
 [lints]
 workspace = true

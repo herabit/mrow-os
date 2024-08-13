@@ -1,3 +1,4 @@
+/*  Stolen from https://github.com/rust-osdev/bootloader/ */
 ENTRY(_start)
 
 SECTIONS {

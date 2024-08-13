@@ -212,7 +212,9 @@ dependencies = [
  "anyhow",
  "cargo_metadata",
  "clap",
+ "flate2",
  "object",
+ "ruzstd",
 ]
 
 [[package]]

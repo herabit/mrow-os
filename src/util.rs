@@ -1,10 +1,14 @@
-use std::io::Write;
+use std::{
+    borrow::Cow,
+    io::{Read, Write},
+    mem,
+};
 
-use anyhow::Context;
+use anyhow::{anyhow, Context};
 use object::{
     elf::SHF_ALLOC,
     read::elf::{ElfFile, ElfSection, FileHeader},
-    Object, ObjectSection, ReadRef, SectionFlags,
+    CompressionFormat, Object, ObjectSection, ReadRef, SectionFlags,
 };
 
 #[inline]
@@ -48,31 +52,97 @@ where
         let name = section.name().context("reading section name")?;
         // let section_end = section.address() + section.size();
 
-        let mut data = section
-            .data()
+        let data = section
+            .compressed_data()
             .with_context(|| format!("reading section data for {name:?}"))?;
 
-        if let Some(next_section) = sections.peek() {
-            let section_end = section.address() + section.size();
-            let padding = next_section.address() - section_end;
+        let uncompressed_size: usize = data
+            .uncompressed_size
+            .try_into()
+            .with_context(|| format!("converting section's decompressed size for {name:?}"))?;
 
-            if padding != 0 {
+        let failed_to_allocate =
+            || format!("allocating {uncompressed_size} bytes for section {name:?}");
+
+        let failed_to_decompress = || format!("decompressing {name:?}");
+
+        // Decompress the data if it is compressed.
+        let mut data = match data.format {
+            CompressionFormat::None => Cow::Borrowed(data.data),
+            CompressionFormat::Zlib => {
                 scratch_buffer.clear();
-                let size = data.len() + padding as usize;
+                scratch_buffer
+                    .try_reserve_exact(uncompressed_size)
+                    .with_context(failed_to_allocate)?;
 
-                scratch_buffer.reserve(size);
-                scratch_buffer.extend_from_slice(data);
-                scratch_buffer.resize(size, pad_byte);
+                let mut decompress = flate2::Decompress::new(true);
 
-                data = &scratch_buffer;
+                decompress
+                    .decompress_vec(data.data, scratch_buffer, flate2::FlushDecompress::Finish)
+                    .with_context(failed_to_decompress)?;
+
+                Cow::Owned(mem::take(scratch_buffer))
             }
+            CompressionFormat::Zstandard => {
+                scratch_buffer.clear();
+                scratch_buffer
+                    .try_reserve_exact(uncompressed_size)
+                    .with_context(failed_to_allocate)?;
+
+                let mut decoder =
+                    ruzstd::StreamingDecoder::new(data.data).with_context(failed_to_decompress)?;
+
+                decoder
+                    .read_to_end(scratch_buffer)
+                    .with_context(failed_to_decompress)?;
+
+                Cow::Owned(mem::take(scratch_buffer))
+            }
+            fmt => {
+                return Err(anyhow!(
+                    "Unsupported compression format {fmt:?} for section {name}"
+                ))
+            }
+        };
+
+        let section_end = section.address() + section.size();
+        let section_padding: usize = sections
+            .peek()
+            .map_or(0, |next| next.address() - section_end)
+            .try_into()
+            .with_context(|| format!("calculating section padding for {name:?}"))?;
+
+        if section_padding != 0 {
+            data = match data {
+                Cow::Borrowed(b) => {
+                    b.clone_into(scratch_buffer);
+                    Cow::Owned(mem::take(scratch_buffer))
+                }
+                data => data,
+            };
+
+            let data = data.to_mut();
+
+            let res = data
+                .try_reserve_exact(section_padding)
+                .with_context(|| format!("allocating section padding for {name:?}"));
+
+            if let Err(err) = res {
+                mem::swap(scratch_buffer, data);
+                return Err(err);
+            }
+
+            data.resize(data.len() + section_padding, pad_byte);
         }
 
         writer
-            .write_all(data)
-            .with_context(|| format!("writing section data for {name:?}"))?;
-
+            .write_all(&data)
+            .with_context(|| format!("writing section {name:?}"))?;
         written += data.len();
+
+        if let Cow::Owned(data) = data {
+            *scratch_buffer = data;
+        }
     }
 
     Ok(written)
