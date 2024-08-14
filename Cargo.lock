@@ -341,9 +341,11 @@ name = "mrow"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytemuck",
  "cargo_metadata",
  "clap",
  "indicatif",
+ "mrow-common",
  "once_cell",
  "tokio",
 ]
@@ -354,6 +356,10 @@ version = "0.1.0"
 dependencies = [
  "mrow-common",
 ]
+
+[[package]]
+name = "mrow-bios-stage-2"
+version = "0.1.0"
 
 [[package]]
 name = "mrow-common"

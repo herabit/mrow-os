@@ -3,6 +3,7 @@ use std::sync::Arc;
 use anyhow::{ensure, Context};
 use cargo::CargoBuild;
 use cargo_metadata::camino::Utf8PathBuf;
+use mrow_common::mbr::MasterBootRecord;
 #[allow(unused_imports)]
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::{fs::File, io::BufWriter};
@@ -41,9 +42,28 @@ async fn run(env: Arc<Env>) -> anyhow::Result<()> {
 
     let bios_builder = BiosBuilder::new(&env, "release");
 
-    let stage_1 = bios_builder.build_stage1(&mut stdout, &mut stderr).await?;
+    let stage_2 = bios_builder.build_stage2(&mut stdout, &mut stderr).await?;
 
-    println!("Got {}", stage_1.len());
+    println!("Stage 2 length: {}", stage_2.len());
+
+    let stage_1 = bios_builder
+        .build_stage1(
+            &mut stdout,
+            &mut stderr,
+            1,
+            u32::try_from(stage_2.len())? / 512,
+        )
+        .await?;
+
+    println!("Stage 1 length: {}", stage_1.len());
+
+    let mut bios_bootloader =
+        BufWriter::new(File::create(env.build_dir.join("bios-boot.bin")).await?);
+
+    bios_bootloader.write_all(&stage_1).await?;
+    bios_bootloader.write_all(&stage_2).await?;
+
+    bios_bootloader.flush().await?;
 
     Ok(())
 }
@@ -62,10 +82,61 @@ impl<'a> BiosBuilder<'a> {
             code16_target: env.metadata.workspace_root.join("i386-code16.json"),
         }
     }
+    pub async fn build_stage2<Stdout, Stderr>(
+        &self,
+        stdout: &mut Stdout,
+        stderr: &mut Stderr,
+    ) -> anyhow::Result<Vec<u8>>
+    where
+        Stdout: AsyncWrite + ?Sized + Unpin,
+        Stderr: AsyncWrite + ?Sized + Unpin,
+    {
+        let package = self
+            .env
+            .metadata
+            .packages
+            .iter()
+            .find(|p| p.name == "mrow-bios-stage-2")
+            .context("failed to find stage-2")?;
+
+        let status = CargoBuild {
+            package: &package.name,
+            target: self.code16_target.as_str(),
+            profile: self.profile,
+            build_std_crates: Some(&["core", "compiler_builtins"]),
+            build_std_features: &["compiler-builtins-mem"],
+            ..Default::default()
+        }
+        .run(&mut tokio::io::empty(), stdout, stderr)
+        .await?;
+
+        ensure!(status.success(), "cargo build exit status: {status}");
+
+        let input = self.env.target_path(
+            self.code16_target.file_stem(),
+            Some(self.profile),
+            Some(&package.name),
+        );
+        let output = self.env.build_path(&package.name, Some("bin"));
+
+        let stage_2 = ObjCopy {
+            input: input.as_str(),
+            output: output.as_str(),
+            output_format: Some("binary"),
+            ..self.env.objcopy()
+        }
+        .run(stdout, stderr)
+        .await?;
+
+        Ok(stage_2)
+    }
+
     pub async fn build_stage1<Stdout, Stderr>(
         &self,
         stdout: &mut Stdout,
         stderr: &mut Stderr,
+        stage_2_lba: u32,
+        stage_2_sectors: u32,
     ) -> anyhow::Result<Vec<u8>>
     where
         Stdout: AsyncWrite + ?Sized + Unpin,
@@ -99,7 +170,7 @@ impl<'a> BiosBuilder<'a> {
         );
         let output = self.env.build_path(&package.name, Some("bin"));
 
-        let stage_1 = ObjCopy {
+        let mut stage_1 = ObjCopy {
             input: input.as_str(),
             output: output.as_str(),
             output_format: Some("binary"),
@@ -107,6 +178,12 @@ impl<'a> BiosBuilder<'a> {
         }
         .run(stdout, stderr)
         .await?;
+
+        let mbr = bytemuck::from_bytes_mut::<MasterBootRecord>(&mut stage_1);
+
+        mbr.partition_table.entries[0].flags |= 0x80;
+        mbr.partition_table.entries[0].set_start_lba(stage_2_lba);
+        mbr.partition_table.entries[0].set_sector_len(stage_2_sectors);
 
         Ok(stage_1)
     }

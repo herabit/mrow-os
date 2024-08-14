@@ -1,0 +1,13 @@
+[package]
+name = "mrow-bios-stage-2"
+edition = "2021"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

@@ -16,6 +16,9 @@ clap = { version = "4.5.15", features = ["derive"] }
 indicatif = { version = "0.17.8", features = ["tokio"] }
 once_cell = "1.19.0"
 tokio = { version = "1.39.2", features = ["full"] }
+mrow-common = { path = "./crates/common", features = ["mbr", "bytemuck", "std"] }
+bytemuck = { workspace = true, features = ["extern_crate_std"] }
+
 # flate2 = "1.0.31"
 # object = { version = "0.36.3", default-features = false, features = ["read_core", "elf", "compression", "unaligned", "std"] }
 # ruzstd = "0.7.0"
@@ -27,6 +30,7 @@ workspace = true
 members = [
     "crates/common",
     "crates/bios-stage-1",
+    "crates/bios-stage-2",
 ]
 resolver = "2"
 
@@ -55,3 +59,32 @@ panic = "abort"
 
 [profile.dev]
 panic = "abort"
+
+
+[profile.release.package.mrow-bios-stage-1]
+opt-level = "s"
+codegen-units = 1
+debug = false
+overflow-checks = false
+debug-assertions = false
+
+[profile.dev.package.mrow-bios-stage-1]
+opt-level = "s"
+codegen-units = 1
+debug = false
+overflow-checks = false
+debug-assertions = false
+
+[profile.release.package.mrow-bios-stage-2]
+opt-level = "s"
+codegen-units = 1
+debug = false
+overflow-checks = false
+debug-assertions = false
+
+[profile.dev.package.mrow-bios-stage-2]
+opt-level = "s"
+codegen-units = 1
+debug = false
+overflow-checks = false
+debug-assertions = false

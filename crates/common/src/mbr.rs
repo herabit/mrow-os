@@ -50,14 +50,12 @@ impl TableEntry {
 
     /// Sets a new value to the logical block address of the entry.
     #[inline]
-    #[must_use]
     pub fn set_start_lba(&mut self, lba: u32) {
         unsafe { addr_of_mut!(self.start_lba).write_unaligned(lba) }
     }
 
     /// Sets a new value to the sector length of the entry.
     #[inline]
-    #[must_use]
     pub fn set_sector_len(&mut self, sector_len: u32) {
         unsafe { addr_of_mut!(self.sector_len).write_unaligned(sector_len) }
     }
@@ -89,7 +87,6 @@ impl MasterBootRecord {
     }
 
     #[inline]
-    #[must_use]
     pub fn set_unique_id(&mut self, unique_id: u32) {
         unsafe { addr_of_mut!(self.unique_id).write_unaligned(unique_id) }
     }
@@ -101,7 +98,6 @@ impl MasterBootRecord {
     }
 
     #[inline]
-    #[must_use]
     pub fn set_reserved(&mut self, reserved: u16) {
         unsafe { addr_of_mut!(self.reserved).write_unaligned(reserved) }
     }
@@ -113,7 +109,6 @@ impl MasterBootRecord {
     }
 
     #[inline]
-    #[must_use]
     pub fn set_signature(&mut self, signature: u16) {
         unsafe { addr_of_mut!(self.signature).write_unaligned(signature) }
     }

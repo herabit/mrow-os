@@ -5,6 +5,7 @@
 
 # This bootstraps the rust part of stage 1.
 _start:
+    cli
     # Zero the segment registers
     xor ax, ax
     mov ds, ax
