@@ -45,6 +45,7 @@ SECTIONS {
         QUAD(0)
         QUAD(0)
     }
+    _partition_table_end = .;
 
     . = 0x7c00 + 510;
 
@@ -53,5 +54,5 @@ SECTIONS {
         SHORT(0xaa55)       /* magic number for bootable disk */
     }
 
-    _second_stage_start = .;
+    _stage_2_start = .;
 }

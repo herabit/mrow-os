@@ -8,7 +8,8 @@ publish.workspace = true
 repository.workspace = true
 
 [dependencies]
-mrow-common = { workspace = true, default-features = false }
+mrow-common = { path = "../common", default-features = false, features = ["mbr"] }
+# bytemuck.workspace = true
 
 [lints]
 workspace = true

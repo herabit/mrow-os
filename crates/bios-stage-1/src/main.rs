@@ -3,24 +3,34 @@
 
 use core::{
     arch::{asm, global_asm},
-    ffi::CStr,
+    ffi::{c_char, c_void},
+    ptr::addr_of,
 };
-
-use mrow_common::option_var;
+use mrow_common::mbr::PartitionTable;
 
 global_asm!(include_str!("./boot.s"));
 
-pub const STAGE_2_SIZE: u16 = match option_var!("MROW_STAGE_2_SIZE", u16) {
-    Some(size) => size,
-    None => 0,
-};
+unsafe extern "C" {
+    pub static _mbr_start: c_void;
+
+    pub static _partition_table: c_void;
+    pub static _stage_2_start: c_void;
+}
+
+#[inline(always)]
+pub unsafe fn partition_table<'a>() -> &'a PartitionTable {
+    unsafe { &*addr_of!(_partition_table).cast::<PartitionTable>() }
+}
 
 #[no_mangle]
 pub unsafe extern "C" fn _stage_1() -> ! {
-    if STAGE_2_SIZE != 0 {
-        unsafe { load_stage_2() };
+    let table = unsafe { partition_table() };
+    let stage_2 = &table.entries[0];
+
+    if stage_2.is_bootable() & (stage_2.sector_len() != 0) {
+        unsafe { load_stage_2() }
     } else {
-        unsafe { no_stage_2() };
+        unsafe { no_stage_2() }
     }
 
     loop {}
@@ -28,34 +38,33 @@ pub unsafe extern "C" fn _stage_1() -> ! {
 
 #[inline(always)]
 unsafe fn load_stage_2() {
-    unsafe { print(c"cannot load the stage 2 loader yet.") };
+    unsafe { print(c"cannot load the stage 2 loader yet.".as_ptr()) };
 }
 
 #[inline(always)]
 unsafe fn no_stage_2() {
-    unsafe { print(c"stage 2 loader does not exist.") };
+    unsafe { print(c"stage 2 loader does not exist.".as_ptr()) };
 }
 
 #[inline(never)]
 #[no_mangle]
-unsafe fn print(msg: &CStr) {
-    let mut ptr = msg.as_ptr();
+unsafe fn print(ptr: *const c_char) {
+    unsafe {
+        asm!(
+            "mov si, {0:x}",
+            "2:",
+            "lodsb",
+            "or al, al",
+            "jz 3f",
 
-    loop {
-        let ch = unsafe { ptr.read() };
+            "mov ah, 0x0e",
+            "mov bh, 0",
+            "int 0x10",
+            "jmp 2b",
 
-        if ch == 0 {
-            break;
-        }
-
-        let ax = (ch as u16) | 0x0e00;
-
-        unsafe {
-            asm!("xor bx, bx", "int 0x10", in("ax") ax);
-            // asm!("push bx", "mov bx, 0", "int 0x10", "pop bx", in("ax") ax);
-        }
-
-        ptr = unsafe { ptr.add(1) };
+            "3:",
+            in(reg) ptr,
+        );
     }
 }
 

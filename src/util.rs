@@ -1,139 +1,286 @@
-use std::io::{self, Read, Write};
-
-use anyhow::{anyhow, Context};
-use flate2::bufread::ZlibDecoder;
-use object::{
-    elf::SHF_ALLOC,
-    read::elf::{ElfFile, ElfSection, FileHeader},
-    CompressedData, CompressionFormat, Object, ObjectSection, ReadRef, SectionFlags,
+use core::str;
+use std::{
+    env::{self, consts::EXE_EXTENSION},
+    io::ErrorKind,
+    process::{ExitStatus, Stdio},
+    str::from_utf8,
+    sync::Arc,
 };
-use ruzstd::{FrameDecoder, StreamingDecoder};
+
+use tokio::{
+    fs,
+    io::{AsyncRead, AsyncWrite},
+    process::Command,
+    task::spawn_blocking,
+    try_join,
+};
+
+use anyhow::{ensure, Context};
+use cargo_metadata::{camino::Utf8PathBuf, Metadata, MetadataCommand};
 
 #[inline]
-pub fn will_strip<'data, 'file, Elf, R>(
-    section: &ElfSection<'data, 'file, Elf, R>,
-    default_value: bool,
-) -> bool
+pub async fn run_command<Stdin, Stdout, Stderr>(
+    command: &mut Command,
+    stdin: &mut Stdin,
+    stdout: &mut Stdout,
+    stderr: &mut Stderr,
+) -> tokio::io::Result<ExitStatus>
 where
-    Elf: FileHeader,
-    R: ReadRef<'data>,
+    Stdin: AsyncRead + ?Sized + Unpin,
+    Stdout: AsyncWrite + ?Sized + Unpin,
+    Stderr: AsyncWrite + ?Sized + Unpin,
 {
-    match section.flags() {
-        SectionFlags::Elf { sh_flags } => (sh_flags & SHF_ALLOC as u64) != SHF_ALLOC as u64,
-        _ => default_value,
-    }
-}
-
-pub enum ObjRead<'data, 'zstd> {
-    Uncompressed(&'data [u8]),
-    Zlib(ZlibDecoder<&'data [u8]>),
-    Zstd(StreamingDecoder<&'data [u8], &'zstd mut FrameDecoder>),
-}
-
-impl<'data, 'zstd> ObjRead<'data, 'zstd> {
-    pub fn new(
-        compressed_data: &CompressedData<'data>,
-        zstd: &'zstd mut FrameDecoder,
-    ) -> anyhow::Result<Self> {
-        match compressed_data.format {
-            CompressionFormat::None => Ok(Self::Uncompressed(compressed_data.data)),
-            CompressionFormat::Zlib => Ok(Self::Zlib(ZlibDecoder::new(compressed_data.data))),
-            CompressionFormat::Zstandard => {
-                let decoder = StreamingDecoder::new_with_decoder(compressed_data.data, zstd)
-                    .context("failed to initialize zstd reader")?;
-
-                Ok(Self::Zstd(decoder))
-            }
-            fmt => Err(anyhow!("unrecognized compression format: {fmt:?}")),
-        }
-    }
-}
-
-impl std::io::Read for ObjRead<'_, '_> {
     #[inline]
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        match self {
-            ObjRead::Uncompressed(u) => u.read(buf),
-            ObjRead::Zlib(z) => z.read(buf),
-            ObjRead::Zstd(z) => z.read(buf),
+    async fn io_copy<'a, R, W>(
+        reader: Option<&'a mut R>,
+        writer: Option<&'a mut W>,
+    ) -> tokio::io::Result<u64>
+    where
+        R: AsyncRead + ?Sized + Unpin,
+        W: AsyncWrite + ?Sized + Unpin,
+    {
+        use tokio::io;
+        match (reader, writer) {
+            (Some(reader), Some(writer)) => io::copy(reader, writer).await,
+            (Some(reader), None) => io::copy(reader, &mut io::sink()).await,
+            (None, Some(writer)) => io::copy(&mut io::empty(), writer).await,
+            _ => Ok(0),
         }
     }
 
-    fn read_vectored(&mut self, bufs: &mut [std::io::IoSliceMut<'_>]) -> std::io::Result<usize> {
-        match self {
-            ObjRead::Uncompressed(u) => u.read_vectored(bufs),
-            ObjRead::Zlib(z) => z.read_vectored(bufs),
-            ObjRead::Zstd(z) => z.read_vectored(bufs),
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    let mut stdin_pipe = child.stdin.take();
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+
+    let stdin_fut = io_copy(Some(stdin), stdin_pipe.as_mut());
+    let stdout_fut = io_copy(stdout_pipe.as_mut(), Some(stdout));
+    let stderr_fut = io_copy(stderr_pipe.as_mut(), Some(stderr));
+
+    match try_join!(child.wait(), stdin_fut, stdout_fut, stderr_fut) {
+        Ok((status, _stdin_bytes, _stdout_bytes, _stderr_bytes)) => Ok(status),
+        Err(err) => Err(err),
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ObjCopy<'a> {
+    /// Path to the objcopy command.
+    pub command: &'a str,
+    /// Path to the input file.
+    pub input: &'a str,
+    /// Input file format.
+    pub input_format: Option<&'a str>,
+    /// Path to the output file.
+    pub output: &'a str,
+    /// Output file format.
+    pub output_format: Option<&'a str>,
+}
+
+impl<'a> ObjCopy<'a> {
+    pub fn command(&self) -> Command {
+        let mut command = Command::new(self.command);
+
+        if let Some(format) = self.input_format {
+            command.args(["-I", format]);
+        }
+
+        if let Some(format) = self.output_format {
+            command.args(["-O", format]);
+        }
+
+        command.args([self.input, self.output]);
+
+        command
+    }
+
+    pub async fn exec<Stdout, Stderr>(
+        &self,
+        stdout: &mut Stdout,
+        stderr: &mut Stderr,
+    ) -> anyhow::Result<()>
+    where
+        Stdout: AsyncWrite + ?Sized + Unpin,
+        Stderr: AsyncWrite + ?Sized + Unpin,
+    {
+        let status =
+            run_command(&mut self.command(), &mut tokio::io::empty(), stdout, stderr).await?;
+
+        ensure!(
+            status.success(),
+            "llvm-objcopy returned with status {status}"
+        );
+
+        Ok(())
+    }
+
+    pub async fn run<Stdout, Stderr>(
+        &self,
+        stdout: &mut Stdout,
+        stderr: &mut Stderr,
+    ) -> anyhow::Result<Vec<u8>>
+    where
+        Stdout: AsyncWrite + ?Sized + Unpin,
+        Stderr: AsyncWrite + ?Sized + Unpin,
+    {
+        self.exec(stdout, stderr).await?;
+
+        tokio::fs::read(self.output)
+            .await
+            .with_context(|| format!("reading {:?}", self.output))
+    }
+}
+
+#[derive(Debug)]
+pub struct Env {
+    // Workspace metadata
+    pub metadata: Metadata,
+    /// Build directory
+    pub build_dir: Utf8PathBuf,
+    /// Target host
+    pub host_target: String,
+    /// Sysroot path
+    pub sysroot: Utf8PathBuf,
+    /// Rustlib path
+    pub rust_lib: Utf8PathBuf,
+    /// Objcopy path
+    pub objcopy: Utf8PathBuf,
+}
+
+impl Env {
+    /// Start building an objcopy command.
+    pub fn objcopy(&self) -> ObjCopy<'_> {
+        ObjCopy {
+            command: self.objcopy.as_str(),
+            ..Default::default()
         }
     }
 
-    fn read_to_end(&mut self, buf: &mut Vec<u8>) -> std::io::Result<usize> {
-        match self {
-            ObjRead::Uncompressed(u) => u.read_to_end(buf),
-            ObjRead::Zlib(z) => z.read_to_end(buf),
-            ObjRead::Zstd(z) => z.read_to_end(buf),
+    /// Create a path in the target dir.
+    pub fn target_path(
+        &self,
+        target: Option<&str>,
+        profile: Option<&str>,
+        file: Option<&str>,
+    ) -> Utf8PathBuf {
+        let mut dir = self.metadata.target_directory.clone();
+
+        if let Some(target) = target.filter(|s| !s.is_empty()) {
+            dir.push(target);
         }
+
+        dir.push(profile.filter(|s| !s.is_empty()).unwrap_or("debug"));
+
+        if let Some(file) = file.filter(|s| !s.is_empty()) {
+            dir.push(file);
+        }
+
+        dir
     }
 
-    fn read_to_string(&mut self, buf: &mut String) -> std::io::Result<usize> {
-        match self {
-            ObjRead::Uncompressed(u) => u.read_to_string(buf),
-            ObjRead::Zlib(z) => z.read_to_string(buf),
-            ObjRead::Zstd(z) => z.read_to_string(buf),
-        }
+    /// Create a path in the build dir
+    pub fn build_path(&self, package: &str, extension: Option<&str>) -> Utf8PathBuf {
+        let mut path = self.build_dir.clone();
+
+        path.push(package);
+        path.set_extension(extension.unwrap_or(""));
+
+        path
     }
 
-    fn read_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
-        match self {
-            ObjRead::Uncompressed(u) => u.read_exact(buf),
-            ObjRead::Zlib(z) => z.read_exact(buf),
-            ObjRead::Zstd(z) => z.read_exact(buf),
+    pub async fn cd_workspace(&self) -> anyhow::Result<()> {
+        let dir = self.metadata.workspace_root.clone();
+        spawn_blocking(move || env::set_current_dir(dir)).await??;
+        Ok(())
+    }
+
+    pub async fn create_build_dir(&self) -> anyhow::Result<()> {
+        match fs::create_dir_all(&self.build_dir).await {
+            Ok(_) => Ok(()),
+            Err(err) if err.kind() == ErrorKind::AlreadyExists => Ok(()),
+            Err(err) => Err(err.into()),
         }
     }
 }
 
-/// Returns how many bytes were written.
-pub fn objcopy_binary<'data, 'file, Elf, R, W, P>(
-    elf: &'file ElfFile<'data, Elf, R>,
-    sections: &mut Vec<ElfSection<'data, 'file, Elf, R>>,
-    writer: &mut W,
-    zstd: &mut Option<FrameDecoder>,
-    pad_byte: u8,
-    predicate: P,
-) -> anyhow::Result<u64>
-where
-    Elf: FileHeader,
-    R: ReadRef<'data>,
-    W: Write,
-    P: FnMut(&ElfSection<'data, 'file, Elf, R>) -> bool,
-{
-    sections.clear();
-    sections.extend(elf.sections().filter(predicate));
-    sections.sort_unstable_by_key(<_>::address);
+pub fn load_env() -> anyhow::Result<Arc<Env>> {
+    let metadata = MetadataCommand::new()
+        .no_deps()
+        .exec()
+        .context("getting cargo metadata")?;
 
-    let mut sections = sections.into_iter().peekable();
-    let mut written = 0u64;
+    let build_dir = metadata.workspace_root.join("build");
+    let host_target = host_target().context("finding host target")?;
+    let sysroot = sysroot().context("finding sysroot")?;
 
-    let zstd = zstd.get_or_insert_with(FrameDecoder::new);
+    let rust_lib = {
+        let mut path = sysroot.clone();
 
-    while let Some(section) = sections.next() {
-        let name = section.name().context("reading section name")?;
+        path.extend(["lib", "rustlib", host_target.as_str()]);
 
-        let (data, compressed) = section
-            .compressed_data()
-            .map_err(anyhow::Error::from)
-            .and_then(|compressed| Ok((ObjRead::new(&compressed, zstd)?, compressed)))
-            .with_context(|| format!("reading compressed section data for {name:?}"))?;
+        path
+    };
 
-        let padding = sections.peek().map_or(0, |next| {
-            next.address() - (section.address() + compressed.uncompressed_size)
-        });
+    let objcopy = {
+        let mut path = rust_lib.clone();
 
-        let pad_data = io::repeat(pad_byte).take(padding);
+        path.extend(["bin", "llvm-objcopy"]);
+        path.set_extension(EXE_EXTENSION);
 
-        written += io::copy(&mut data.chain(pad_data), writer)
-            .with_context(|| format!("writing section {name:?}"))?;
-    }
+        path
+    };
 
-    Ok(written)
+    Ok(Arc::new(Env {
+        metadata,
+        build_dir,
+        host_target,
+        sysroot,
+        rust_lib,
+        objcopy,
+    }))
+}
+
+#[inline]
+fn sysroot() -> anyhow::Result<Utf8PathBuf> {
+    let output = std::process::Command::new("rustc")
+        .args(["--print", "sysroot"])
+        .output()?;
+
+    ensure!(
+        output.status.success(),
+        "rustc returned with status {}",
+        output.status
+    );
+
+    let sysroot = from_utf8(&output.stdout).context("parsing stdout")?.trim();
+
+    Ok(sysroot.into())
+}
+
+#[inline]
+fn host_target() -> anyhow::Result<String> {
+    let output = std::process::Command::new("rustc")
+        .args(["--version", "--verbose"])
+        .output()?;
+
+    ensure!(
+        output.status.success(),
+        "rustc returned with status {}",
+        output.status
+    );
+
+    let output = str::from_utf8(&output.stdout).context("parsing stdout")?;
+
+    let output = output
+        .lines()
+        .find_map(|line| line.strip_prefix("host:"))
+        .map(str::trim)
+        .context("finding host in rustc version")?;
+
+    Ok(output.to_owned())
 }

@@ -1,4 +1,12 @@
-use std::process::Command;
+use std::process::ExitStatus;
+
+// use std::process::Command;
+use tokio::{
+    io::{AsyncRead, AsyncWrite},
+    process::Command,
+};
+
+use crate::util::run_command;
 
 pub const BUILD_STD_CRATES: &[&str] = &[
     "std",
@@ -25,6 +33,20 @@ pub struct CargoBuild<'a> {
 }
 
 impl<'a> CargoBuild<'a> {
+    pub async fn run<Stdin, Stdout, Stderr>(
+        &self,
+        stdin: &mut Stdin,
+        stdout: &mut Stdout,
+        stderr: &mut Stderr,
+    ) -> tokio::io::Result<ExitStatus>
+    where
+        Stdin: AsyncRead + ?Sized + Unpin,
+        Stdout: AsyncWrite + ?Sized + Unpin,
+        Stderr: AsyncWrite + ?Sized + Unpin,
+    {
+        run_command(&mut self.command(), stdin, stdout, stderr).await
+    }
+
     pub fn command(&self) -> Command {
         let mut command = Command::new("cargo");
         command.arg("+nightly");

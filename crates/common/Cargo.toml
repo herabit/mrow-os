@@ -8,9 +8,14 @@ publish.workspace = true
 repository.workspace = true
 
 [features]
-default = []
+default = ["std", "mbr", "bytemuck"]
+std = ["alloc", "bytemuck?/extern_crate_std"]
+alloc = ["bytemuck?/extern_crate_alloc"]
+mbr = []
+bytemuck = ["dep:bytemuck"]
 
 [dependencies]
+bytemuck = { workspace = true, optional = true, features = ["derive", "min_const_generics"] }
 
 [lints]
 workspace = true
