@@ -1,6 +1,4 @@
-use std::process::ExitStatus;
-
-// use std::process::Command;
+use anyhow::ensure;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     process::Command,
@@ -8,6 +6,7 @@ use tokio::{
 
 use crate::util::run_command;
 
+/// This exists just so that I can keep track of what the build-std crates are.
 pub const BUILD_STD_CRATES: &[&str] = &[
     "std",
     "core",
@@ -17,49 +16,90 @@ pub const BUILD_STD_CRATES: &[&str] = &[
     "compiler_builtins",
 ];
 
-#[derive(Debug, Clone, Copy, Default)]
+/// Type for building a cargo build command.
+#[derive(Debug, Clone, Copy)]
 pub struct CargoBuild<'a> {
+    /// Path to cargo.
+    pub command: &'a str,
+
+    /// Package to build.
     pub package: &'a str,
-
+    /// What target we're building for.
     pub target: &'a str,
+    /// The profile we're building with.
     pub profile: &'a str,
-    pub features: &'a [&'a str],
 
+    /// What features are enabled.
+    ///
+    /// Skips any keys that are empty.
+    pub features: &'a [&'a str],
+    /// Whether to disable default features.
+    pub default_features: bool,
+
+    /// List of additional arguments to pass to cargo.
     pub additional_args: &'a [&'a str],
+    /// List of key value pairs representing environment variables to pass to cargo.
+    ///
+    /// Skips any keys that are empty.
     pub envs: &'a [(&'a str, &'a str)],
 
-    pub build_std_crates: Option<&'a [&'a str]>,
+    /// List of build-std crates to use.
+    pub build_std: Option<&'a [&'a str]>,
+    /// List of features for build-std.
+    ///
+    /// Only used if `build_std` is set and this is not empy.
     pub build_std_features: &'a [&'a str],
 }
 
 impl<'a> CargoBuild<'a> {
+    /// Creates a default cargo build command for a given environment.
+    pub fn new(cargo_path: &'a str) -> Self {
+        Self {
+            command: cargo_path,
+            package: "",
+            target: "",
+            profile: "",
+            features: &[],
+            default_features: true,
+            additional_args: &[],
+            envs: &[],
+            build_std: None,
+            build_std_features: &[],
+        }
+    }
+
+    /// Creates a cargo build command and then executes it.
     pub async fn run<Stdin, Stdout, Stderr>(
         &self,
         stdin: &mut Stdin,
         stdout: &mut Stdout,
         stderr: &mut Stderr,
-    ) -> tokio::io::Result<ExitStatus>
+    ) -> anyhow::Result<()>
     where
         Stdin: AsyncRead + ?Sized + Unpin,
         Stdout: AsyncWrite + ?Sized + Unpin,
         Stderr: AsyncWrite + ?Sized + Unpin,
     {
-        run_command(&mut self.command(), stdin, stdout, stderr).await
+        let status = run_command(&mut self.command(), stdin, stdout, stderr).await?;
+
+        ensure!(status.success(), "cargo build exit status: {status}");
+
+        Ok(())
     }
 
+    /// Creates a cargo build command.
     pub fn command(&self) -> Command {
-        let mut command = Command::new("cargo");
-        command.arg("+nightly");
+        let mut command = Command::new(self.command);
 
         let mut scratch = String::new();
 
         // Setup build-std
-        if let Some(crates) = self.build_std_crates {
+        if let Some(build_std) = self.build_std {
             scratch.push_str("-Zbuild-std");
 
             let mut ch = '=';
 
-            for krate in crates {
+            for krate in build_std {
                 scratch.push(ch);
                 scratch.push_str(krate);
 
@@ -104,6 +144,8 @@ impl<'a> CargoBuild<'a> {
         if !self.envs.is_empty() {
             command.envs(self.envs.iter().copied());
         }
+
+        command.kill_on_drop(true);
 
         command
     }

@@ -43,7 +43,6 @@ publish = false
 repository = "https://github.com/herabit/mrow-os"
 
 [workspace.dependencies]
-mrow-common = { path = "crates/common" }
 bytemuck = "1.16.3"
 
 [workspace.lints.rust]
@@ -59,32 +58,3 @@ panic = "abort"
 
 [profile.dev]
 panic = "abort"
-
-
-[profile.release.package.mrow-bios-stage-1]
-opt-level = "s"
-codegen-units = 1
-debug = false
-overflow-checks = false
-debug-assertions = false
-
-[profile.dev.package.mrow-bios-stage-1]
-opt-level = "s"
-codegen-units = 1
-debug = false
-overflow-checks = false
-debug-assertions = false
-
-[profile.release.package.mrow-bios-stage-2]
-opt-level = "s"
-codegen-units = 1
-debug = false
-overflow-checks = false
-debug-assertions = false
-
-[profile.dev.package.mrow-bios-stage-2]
-opt-level = "s"
-codegen-units = 1
-debug = false
-overflow-checks = false
-debug-assertions = false

@@ -1,7 +1,12 @@
 #![no_std]
 #![no_main]
 
-use core::ffi::c_char;
+use core::ffi::{c_char, c_void};
+
+unsafe extern "C" {
+    pub static _mbr_start: c_void;
+    pub static _stage_2_end: c_void;
+}
 
 #[no_mangle]
 #[link_section = ".start"]

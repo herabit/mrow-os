@@ -3,13 +3,11 @@ use std::{
     env::{self, consts::EXE_EXTENSION},
     io::ErrorKind,
     process::{ExitStatus, Stdio},
-    str::from_utf8,
-    sync::Arc,
 };
 
 use tokio::{
-    fs,
-    io::{AsyncRead, AsyncWrite},
+    fs::{self, File},
+    io::{self, AsyncRead, AsyncWrite},
     process::Command,
     task::spawn_blocking,
     try_join,
@@ -17,6 +15,26 @@ use tokio::{
 
 use anyhow::{ensure, Context};
 use cargo_metadata::{camino::Utf8PathBuf, Metadata, MetadataCommand};
+
+use crate::cargo::CargoBuild;
+
+#[inline]
+pub async fn io_copy<'a, R, W>(
+    reader: Option<&'a mut R>,
+    writer: Option<&'a mut W>,
+) -> tokio::io::Result<u64>
+where
+    R: AsyncRead + ?Sized + Unpin,
+    W: AsyncWrite + ?Sized + Unpin,
+{
+    use tokio::io;
+    match (reader, writer) {
+        (Some(reader), Some(writer)) => io::copy(reader, writer).await,
+        (Some(reader), None) => io::copy(reader, &mut io::sink()).await,
+        (None, Some(writer)) => io::copy(&mut io::empty(), writer).await,
+        _ => Ok(0),
+    }
+}
 
 #[inline]
 pub async fn run_command<Stdin, Stdout, Stderr>(
@@ -30,24 +48,6 @@ where
     Stdout: AsyncWrite + ?Sized + Unpin,
     Stderr: AsyncWrite + ?Sized + Unpin,
 {
-    #[inline]
-    async fn io_copy<'a, R, W>(
-        reader: Option<&'a mut R>,
-        writer: Option<&'a mut W>,
-    ) -> tokio::io::Result<u64>
-    where
-        R: AsyncRead + ?Sized + Unpin,
-        W: AsyncWrite + ?Sized + Unpin,
-    {
-        use tokio::io;
-        match (reader, writer) {
-            (Some(reader), Some(writer)) => io::copy(reader, writer).await,
-            (Some(reader), None) => io::copy(reader, &mut io::sink()).await,
-            (None, Some(writer)) => io::copy(&mut io::empty(), writer).await,
-            _ => Ok(0),
-        }
-    }
-
     let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -146,10 +146,154 @@ pub struct Env {
     pub host_target: String,
     /// Sysroot path
     pub sysroot: Utf8PathBuf,
+    /// Cargo path
+    pub cargo: Utf8PathBuf,
     /// Rustlib path
     pub rust_lib: Utf8PathBuf,
     /// Objcopy path
     pub objcopy: Utf8PathBuf,
+}
+
+pub async fn load_env<Stdin, Stderr>(stdin: &mut Stdin, stderr: &mut Stderr) -> anyhow::Result<Env>
+where
+    Stdin: AsyncRead + ?Sized + Unpin,
+    Stderr: AsyncWrite + ?Sized + Unpin,
+{
+    let host_target = host_target(stdin, stderr)
+        .await
+        .context("finding host target")?;
+
+    let sysroot = sysroot(stdin, stderr).await.context("finding sysroot")?;
+
+    let cargo = {
+        let mut path = sysroot.clone();
+        path.extend(["bin", "cargo"]);
+        path.set_extension(EXE_EXTENSION);
+
+        path
+    };
+
+    let rust_lib = {
+        let mut path = sysroot.clone();
+
+        path.extend(["lib", "rustlib", host_target.as_str()]);
+
+        path
+    };
+
+    let objcopy = {
+        let mut path = rust_lib.clone();
+
+        path.extend(["bin", "llvm-objcopy"]);
+        path.set_extension(EXE_EXTENSION);
+
+        path
+    };
+
+    let metadata = metadata(cargo.as_str(), stdin, stderr)
+        .await
+        .context("retrieving cargo metadata")?;
+
+    let build_dir = metadata.workspace_root.join("build");
+
+    Ok(Env {
+        metadata,
+        build_dir,
+        host_target,
+        sysroot,
+        rust_lib,
+        objcopy,
+        cargo,
+    })
+}
+
+#[inline]
+async fn metadata<Stdin, Stderr>(
+    cargo_path: &str,
+    stdin: &mut Stdin,
+    stderr: &mut Stderr,
+) -> anyhow::Result<Metadata>
+where
+    Stdin: AsyncRead + ?Sized + Unpin,
+    Stderr: AsyncWrite + ?Sized + Unpin,
+{
+    let command = MetadataCommand::new()
+        .no_deps()
+        .cargo_path(cargo_path)
+        .cargo_command();
+    let mut command = Command::from(command);
+
+    let mut output = Vec::new();
+
+    let status = run_command(command.kill_on_drop(true), stdin, &mut output, stderr).await?;
+
+    ensure!(status.success(), "cargo exited with status: {status}");
+
+    let output = String::from_utf8(output).context("parsing cargo metadata")?;
+
+    MetadataCommand::parse(output).context("parsing cargo metadata")
+}
+
+#[inline]
+async fn sysroot<Stdin, Stderr>(
+    stdin: &mut Stdin,
+    stderr: &mut Stderr,
+) -> anyhow::Result<Utf8PathBuf>
+where
+    Stdin: AsyncRead + ?Sized + Unpin,
+    Stderr: AsyncWrite + ?Sized + Unpin,
+{
+    let mut output = Vec::new();
+
+    let status = run_command(
+        Command::new("rustc")
+            .kill_on_drop(true)
+            .args(["--print", "sysroot"]),
+        stdin,
+        &mut output,
+        stderr,
+    )
+    .await?;
+
+    ensure!(status.success(), "rustc exited with status: {status}");
+
+    let sysroot = String::from_utf8(output).context("parsing sysroot")?;
+
+    Ok(sysroot.trim().into())
+}
+
+#[inline]
+async fn host_target<Stdin, Stderr>(
+    stdin: &mut Stdin,
+    stderr: &mut Stderr,
+) -> anyhow::Result<String>
+where
+    Stdin: AsyncRead + ?Sized + Unpin,
+    Stderr: AsyncWrite + ?Sized + Unpin,
+{
+    let mut output = Vec::new();
+
+    let status = run_command(
+        Command::new("rustc")
+            .kill_on_drop(true)
+            .args(["--version", "--verbose"]),
+        stdin,
+        &mut output,
+        stderr,
+    )
+    .await?;
+
+    ensure!(status.success(), "rustc returned with status {status}",);
+
+    let output = String::from_utf8(output).context("parsing rustc version info")?;
+
+    let output = output
+        .lines()
+        .find_map(|line| line.strip_prefix("host:"))
+        .map(str::trim)
+        .context("finding host in rustc version info")?;
+
+    Ok(output.to_owned())
 }
 
 impl Env {
@@ -159,6 +303,11 @@ impl Env {
             command: self.objcopy.as_str(),
             ..Default::default()
         }
+    }
+
+    /// Start building a cargo build command.
+    pub fn cargo_build(&self) -> CargoBuild<'_> {
+        CargoBuild::new(self.cargo.as_str())
     }
 
     /// Create a path in the target dir.
@@ -199,88 +348,71 @@ impl Env {
         Ok(())
     }
 
-    pub async fn create_build_dir(&self) -> anyhow::Result<()> {
+    pub async fn remove_build_dir(&self) -> io::Result<()> {
+        match fs::remove_dir_all(&self.build_dir).await {
+            Ok(_) => Ok(()),
+            Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err),
+        }
+    }
+
+    pub async fn create_build_dir(&self) -> io::Result<()> {
         match fs::create_dir_all(&self.build_dir).await {
             Ok(_) => Ok(()),
             Err(err) if err.kind() == ErrorKind::AlreadyExists => Ok(()),
-            Err(err) => Err(err.into()),
+            Err(err) => Err(err),
         }
     }
-}
 
-pub fn load_env() -> anyhow::Result<Arc<Env>> {
-    let metadata = MetadataCommand::new()
-        .no_deps()
-        .exec()
-        .context("getting cargo metadata")?;
+    #[inline]
+    async fn setup_log_file(&self, filename: &str) -> anyhow::Result<File> {
+        let mut path = self.build_dir.clone();
+        path.push(filename);
+        path.set_extension("log");
 
-    let build_dir = metadata.workspace_root.join("build");
-    let host_target = host_target().context("finding host target")?;
-    let sysroot = sysroot().context("finding sysroot")?;
+        File::options()
+            .append(true)
+            .create(true)
+            .open(path.as_path())
+            .await
+            .with_context(|| format!("opening log file at {path:?}"))
+    }
 
-    let rust_lib = {
-        let mut path = sysroot.clone();
+    #[inline]
+    async fn setup_dir(&self, reset: bool) -> anyhow::Result<(File, File)> {
+        if reset {
+            self.remove_build_dir()
+                .await
+                .context("removing previous build dir")?;
+        }
 
-        path.extend(["lib", "rustlib", host_target.as_str()]);
+        self.create_build_dir()
+            .await
+            .context("creating build dir")?;
 
-        path
-    };
+        let setup_stdout = self.setup_log_file("stdout");
+        let setup_stderr = self.setup_log_file("stderr");
 
-    let objcopy = {
-        let mut path = rust_lib.clone();
+        try_join!(setup_stdout, setup_stderr)
+    }
 
-        path.extend(["bin", "llvm-objcopy"]);
-        path.set_extension(EXE_EXTENSION);
+    /// Setup the build environment.
+    ///
+    /// `reset_dir` indicates whether we should reset the build directory.
+    ///
+    /// Returns (stdout_file, stderr_file).
+    pub async fn setup_build(&self, reset_dir: bool) -> anyhow::Result<(File, File)> {
+        let cd = async {
+            self.cd_workspace()
+                .await
+                .context("changing directory into workspace")
+        };
+        let build_dir = async {
+            self.setup_dir(reset_dir)
+                .await
+                .context("setting up build directory")
+        };
 
-        path
-    };
-
-    Ok(Arc::new(Env {
-        metadata,
-        build_dir,
-        host_target,
-        sysroot,
-        rust_lib,
-        objcopy,
-    }))
-}
-
-#[inline]
-fn sysroot() -> anyhow::Result<Utf8PathBuf> {
-    let output = std::process::Command::new("rustc")
-        .args(["--print", "sysroot"])
-        .output()?;
-
-    ensure!(
-        output.status.success(),
-        "rustc returned with status {}",
-        output.status
-    );
-
-    let sysroot = from_utf8(&output.stdout).context("parsing stdout")?.trim();
-
-    Ok(sysroot.into())
-}
-
-#[inline]
-fn host_target() -> anyhow::Result<String> {
-    let output = std::process::Command::new("rustc")
-        .args(["--version", "--verbose"])
-        .output()?;
-
-    ensure!(
-        output.status.success(),
-        "rustc returned with status {}",
-        output.status
-    );
-
-    let output = str::from_utf8(&output.stdout).context("parsing stdout")?;
-
-    let output = output
-        .lines()
-        .find_map(|line| line.strip_prefix("host:"))
-        .map(str::trim)
-        .context("finding host in rustc version")?;
-
-    Ok(output.to_owned())
+        try_join!(cd, build_dir).map(|(_, log_files)| log_files)
+    }
 }
