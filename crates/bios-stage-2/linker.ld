@@ -7,9 +7,10 @@ SECTIONS {
 
     /* This is where we start at. */
     . = 0x7c00 + 512;
+    _mbr_end = .;
+
+    /* This is the start of our stage 2 loader. */    
     _stage_2_start = .;
-    _image_start = .;
-    
     .start :
     {
         *(.start .start.*)
@@ -27,9 +28,19 @@ SECTIONS {
         *(.rodata .rodata.*)
         *(.data .data.*)
         *(.got .got.*)
+    }
+    .eh_frame : {
+        *(.eh_frame .eh_frame.*)
+    }
+    .eh_frame_hdr : {
+        *(.eh_frame_hdr .eh_frame_hdr.*)
+    }
+    /* Just a section for padding. */
+    .padding : {
         . = ALIGN(512);
     }
-
-    /* This is the end of the actual stage 2 loader */
     _stage_2_end = .;
+
+    /* Start of stage 3. */
+    _stage_3_start = .;
 }

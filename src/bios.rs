@@ -162,8 +162,6 @@ impl<'a> BiosBuilder<'a> {
         &self,
         stdout: &mut Stdout,
         stderr: &mut Stderr,
-        // stage_2_lba: u32,
-        // stage_2_sectors: u32,
     ) -> anyhow::Result<Vec<u8>>
     where
         Stdout: AsyncWrite + ?Sized + Unpin,
@@ -205,11 +203,6 @@ impl<'a> BiosBuilder<'a> {
         .run(stdout, stderr)
         .await
         .with_context(|| format!("running objcopy on bios-stage-1"))?;
-
-        // let mbr = bytemuck::from_bytes_mut::<MasterBootRecord>(&mut stage_1);
-        // mbr.partition_table.entries[0].flags |= 0x80;
-        // mbr.partition_table.entries[0].set_start_lba(stage_2_lba);
-        // mbr.partition_table.entries[0].set_sector_len(stage_2_sectors);
 
         Ok(stage_1)
     }
