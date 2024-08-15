@@ -1,4 +1,4 @@
-use anyhow::ensure;
+use anyhow::anyhow;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     process::Command,
@@ -74,7 +74,7 @@ impl<'a> CargoBuild<'a> {
         stdin: &mut Stdin,
         stdout: &mut Stdout,
         stderr: &mut Stderr,
-    ) -> anyhow::Result<()>
+    ) -> Result<(), Vec<anyhow::Error>>
     where
         Stdin: AsyncRead + ?Sized + Unpin,
         Stdout: AsyncWrite + ?Sized + Unpin,
@@ -82,7 +82,9 @@ impl<'a> CargoBuild<'a> {
     {
         let status = run_command(&mut self.command(), stdin, stdout, stderr).await?;
 
-        ensure!(status.success(), "cargo build exit status: {status}");
+        if !status.success() {
+            return Err(vec![anyhow!("cargo exited with status: {status}")]);
+        }
 
         Ok(())
     }

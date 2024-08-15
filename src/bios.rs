@@ -1,18 +1,18 @@
 use std::path::PathBuf;
 
-use anyhow::{ensure, Context};
+use anyhow::{anyhow, Context};
 use bytemuck::checked::try_from_bytes_mut;
 use cargo_metadata::camino::Utf8PathBuf;
 use mrow_common::mbr::MasterBootRecord;
 use tokio::{
     fs::File,
     io::{AsyncWrite, AsyncWriteExt},
-    try_join,
+    join,
 };
 
 use crate::{
     cargo::CargoBuild,
-    util::{Env, ObjCopy},
+    util::{apply_context, Env, ObjCopy},
 };
 
 /// Struct for building a bios bootloader.
@@ -39,11 +39,11 @@ impl<'a> BiosBuilder<'a> {
         stdout: &mut File,
         stderr: &mut File,
         path: &mut PathBuf,
-    ) -> anyhow::Result<(Vec<u8>, File)> {
+    ) -> Result<(Vec<u8>, File), Vec<anyhow::Error>> {
         let bootloader = self
             .build(stdout, stderr)
             .await
-            .context("building bootloader")?;
+            .map_err(apply_context(|| "building bootloader"))?;
 
         self.env.build_dir.as_std_path().clone_into(path);
         path.push("bios-boot.bin");
@@ -54,48 +54,75 @@ impl<'a> BiosBuilder<'a> {
             .write(true)
             .open(path.as_path())
             .await
-            .context("creating bootloader file")?;
+            .context("creating bootloader file")
+            .map_err(|err| vec![err])?;
 
         file.write_all(bootloader.as_slice())
             .await
-            .context("writing bootloader file")?;
-        file.flush().await.context("flushing bootloader file")?;
+            .context("writing bootloader file")
+            .map_err(|err| vec![err])?;
+
+        file.flush()
+            .await
+            .context("flushing bootloader file")
+            .map_err(|err| vec![err])?;
 
         Ok((bootloader, file))
     }
 
     /// Builds the bios bootloader.
-    pub async fn build(&self, stdout: &mut File, stderr: &mut File) -> anyhow::Result<Vec<u8>> {
+    pub async fn build(
+        &self,
+        stdout: &mut File,
+        stderr: &mut File,
+    ) -> Result<Vec<u8>, Vec<anyhow::Error>> {
         let stage_1 = {
-            let mut stdout = stdout.try_clone().await?;
-            let mut stderr = stderr.try_clone().await?;
+            let mut stdout = stdout.try_clone().await.map_err(|err| vec![err.into()])?;
+            let mut stderr = stderr.try_clone().await.map_err(|err| vec![err.into()])?;
 
             async move {
                 self.build_stage1(&mut stdout, &mut stderr)
                     .await
-                    .context("building stage 1")
+                    .map_err(apply_context(|| "building stage 1"))
             }
         };
 
         let stage_2 = async {
             self.build_stage2(stdout, stderr)
                 .await
-                .context("building stage 2")
+                .map_err(apply_context(|| "building stage 2"))
+            // .context("building stage 2")
         };
 
-        let (mut stage_1, stage_2) = try_join!(stage_1, stage_2).context("building stages")?;
+        let (mut stage_1, stage_2) = match join!(stage_1, stage_2) {
+            (Ok(stage_1), Ok(stage_2)) => (stage_1, stage_2),
+            (Ok(_), Err(err_2)) => return Err(err_2),
+            (Err(err_1), Ok(_)) => return Err(err_1),
+            (Err(mut err_1), Err(mut err_2)) => {
+                err_1.append(&mut err_2);
+
+                return Err(err_1);
+            }
+        };
+
+        // let (mut stage_1, stage_2) = try_join!(stage_1, stage_2).context("building stages")?;
 
         let mbr = try_from_bytes_mut::<MasterBootRecord>(&mut stage_1)
-            .context("getting master boot record")?;
+            .context("getting master boot record")
+            .map_err(|err| vec![err])?;
 
-        ensure!(!stage_2.is_empty(), "stage 2 loader must not be empty");
-        ensure!(
-            stage_2.len() % 512 == 0,
-            "stage 2 loader size must be a multiple of 512"
-        );
+        if stage_2.is_empty() {
+            return Err(vec![anyhow!("stage 2 loader must not be empty")]);
+        } else if stage_2.len() % 512 != 0 {
+            return Err(vec![anyhow!(
+                "stage 2 loader size must be a multiple of 512"
+            )]);
+        }
 
         let stage_2_sectors = u32::try_from(stage_2.len() / 512)
-            .context("stage 2 loader sector size must fit in a u32")?;
+            .context("stage 2 loader sector size must fit in a u32")
+            .map_err(|err| vec![err])?;
+
         let bootloader_parition = &mut mbr.partition_table.entries[0];
 
         bootloader_parition.flags |= 0x80;
@@ -113,7 +140,7 @@ impl<'a> BiosBuilder<'a> {
         &self,
         stdout: &mut Stdout,
         stderr: &mut Stderr,
-    ) -> anyhow::Result<Vec<u8>>
+    ) -> Result<Vec<u8>, Vec<anyhow::Error>>
     where
         Stdout: AsyncWrite + ?Sized + Unpin,
         Stderr: AsyncWrite + ?Sized + Unpin,
@@ -124,7 +151,8 @@ impl<'a> BiosBuilder<'a> {
             .packages
             .iter()
             .find(|p| p.name == "mrow-bios-stage-2")
-            .context("failed to find stage-2")?;
+            .context("failed to find stage-2")
+            .map_err(|err| vec![err])?;
 
         // Build it
         CargoBuild {
@@ -139,7 +167,7 @@ impl<'a> BiosBuilder<'a> {
         .await?;
 
         let input = self.env.target_path(
-            self.code16_target.file_stem(),
+            self.code16_pic_target.file_stem(),
             Some(self.profile),
             Some(&package.name),
         );
@@ -162,7 +190,7 @@ impl<'a> BiosBuilder<'a> {
         &self,
         stdout: &mut Stdout,
         stderr: &mut Stderr,
-    ) -> anyhow::Result<Vec<u8>>
+    ) -> Result<Vec<u8>, Vec<anyhow::Error>>
     where
         Stdout: AsyncWrite + ?Sized + Unpin,
         Stderr: AsyncWrite + ?Sized + Unpin,
@@ -173,7 +201,8 @@ impl<'a> BiosBuilder<'a> {
             .packages
             .iter()
             .find(|p| p.name == "mrow-bios-stage-1")
-            .context("failed to find stage-1")?;
+            .context("failed to find stage-1")
+            .map_err(|err| vec![err])?;
 
         // Build it
         CargoBuild {
@@ -202,7 +231,7 @@ impl<'a> BiosBuilder<'a> {
         }
         .run(stdout, stderr)
         .await
-        .with_context(|| format!("running objcopy on bios-stage-1"))?;
+        .map_err(apply_context(|| "running objcopy on bios-stage-1"))?;
 
         Ok(stage_1)
     }

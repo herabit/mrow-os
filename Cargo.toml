@@ -17,6 +17,8 @@ indicatif = { version = "0.17.8", features = ["tokio"] }
 tokio = { version = "1.39.2", features = ["full"] }
 mrow-common = { path = "./crates/common", features = ["mbr", "bytemuck", "std"] }
 bytemuck = { workspace = true, features = ["extern_crate_std"] }
+pin-project = "1.1.5"
+replace_with = "0.1.7"
 
 [lints]
 workspace = true
@@ -49,34 +51,22 @@ unused_unsafe = "allow"
 borrow_as_ptr = "warn"
 
 [profile.release]
+lto = "fat"
 panic = "abort"
 
 [profile.dev]
 panic = "abort"
 
-
-[profile.dev.package.mrow-bios-stage-1]
+[profile.bios-dev]
+inherits = "dev"
 opt-level = "z"
 codegen-units = 1
 debug = false
 debug-assertions = false
 overflow-checks = false
 
-[profile.release.package.mrow-bios-stage-1]
-opt-level = "z"
-codegen-units = 1
-debug = false
-debug-assertions = false
-overflow-checks = false
-
-[profile.dev.package.mrow-bios-stage-2]
-opt-level = "z"
-codegen-units = 1
-debug = false
-debug-assertions = false
-overflow-checks = false
-
-[profile.release.package.mrow-bios-stage-2]
+[profile.bios-release]
+inherits = "release"
 opt-level = "z"
 codegen-units = 1
 debug = false
